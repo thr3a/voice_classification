@@ -1,81 +1,53 @@
 import os
+import pickle
 
-import joblib
-import numpy as np
-import opensmile
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
-from sklearn.model_selection import train_test_split
+import librosa
+from pyannote.audio import Inference, Model
+from sklearn.preprocessing import LabelEncoder
+from sklearn.svm import SVC
 
+# pyannote/embeddingモデルを読み込む
+model = Model.from_pretrained("pyannote/embedding", use_auth_token="YOUR_ACCESS_TOKEN")
+inference = Inference(model, window="whole")
 
-# openSMILEを使用して音声ファイルから特徴量を抽出する関数
-def extract_features(file_path):
-    smile = opensmile.Smile(
-        feature_set=opensmile.FeatureSet.ComParE_2016,
-        feature_level=opensmile.FeatureLevel.Functionals,
-    )
-    features = smile.process_file(file_path)
-    return features.values.flatten()
+# 話者の音声ファイルが格納されているディレクトリ
+voices_dir = "./voices"
 
+embeddings = []
+labels = []
 
-# 音声ファイルとラベルを読み込む関数
-def load_data(root_dir):
-    X = []
-    y = []
-    for speaker_dir in os.listdir(root_dir):
-        speaker_path = os.path.join(root_dir, speaker_dir)
-        if os.path.isdir(speaker_path):
-            for file in os.listdir(speaker_path):
-                if file.endswith(".wav"):
-                    file_path = os.path.join(speaker_path, file)
-                    features = extract_features(file_path)
-                    X.append(features)
-                    y.append(speaker_dir)
-    return np.array(X), np.array(y)
+# 各話者のディレクトリをループ
+for speaker in os.listdir(voices_dir):
+    speaker_dir = os.path.join(voices_dir, speaker)
+    if os.path.isdir(speaker_dir):
+        # 各音声ファイルをループ
+        for file in os.listdir(speaker_dir):
+            if file.endswith(".wav"):
+                file_path = os.path.join(speaker_dir, file)
+                print(file_path)
+                duration = librosa.get_duration(path=file_path)
+                # 一定秒数未満の音声ファイルはスキップ
+                threshold_seconds = 2
+                if duration < threshold_seconds:
+                    print(
+                        f"Skipping {file_path}: Duration is less than {threshold_seconds} seconds ({duration:.2f}s)"
+                    )
+                    continue
+                # 音声ファイルから埋め込みベクトルを抽出
+                embedding = inference(file_path)
+                embeddings.append(embedding.squeeze())
+                labels.append(speaker)
 
+# ラベルをエンコード
+le = LabelEncoder()
+encoded_labels = le.fit_transform(labels)
 
-# モデルを学習する関数
-def train_model(X, y):
-    # データを訓練用とテスト用に分割（テストデータ20%）
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
+# SVMモデルを訓練
+svm = SVC(kernel="rbf", probability=True)
+svm.fit(embeddings, encoded_labels)
 
-    # ランダムフォレスト分類器を初期化して学習
-    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-    clf.fit(X_train, y_train)
+# モデルと関連情報を保存
+with open("voices.pkl", "wb") as f:
+    pickle.dump({"svm": svm, "label_encoder": le}, f)
 
-    # テストデータで予測を行い、精度を計算
-    y_pred = clf.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    print(f"モデルの精度: {accuracy:.2f}")
-
-    return clf
-
-
-# モデルを保存する関数
-def save_model(model, filename):
-    joblib.dump(model, filename)
-    print(f"モデルを {filename} に保存しました。")
-
-
-# モデルをロードする関数
-def load_model(filename):
-    return joblib.load(filename)
-
-
-if __name__ == "__main__":
-    # 音声ファイルのルートディレクトリ
-    root_dir = "./voices"
-
-    # データの読み込みと特徴量抽出
-    print("データを読み込み中...")
-    X, y = load_data(root_dir)
-
-    # モデルの学習
-    print("モデルを学習中...")
-    model = train_model(X, y)
-
-    # モデルの保存
-    model_filename = "voice_classification_model.joblib"
-    save_model(model, model_filename)
+print("saved as voices.pkl")
